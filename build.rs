@@ -5,6 +5,7 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() -> miette::Result<()> {
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let llama_path = std::env::current_dir().unwrap().join("./extern/llama-cpp");
 
     // Build Llama.cpp
@@ -14,6 +15,7 @@ fn main() -> miette::Result<()> {
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("BUILD_SHARED_LIBS", "ON")
+        // .define("CMAKE_LIBRARY_OUTPUT_DIRECTORY", out_path.to_str().unwrap())
         .build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
@@ -28,7 +30,6 @@ fn main() -> miette::Result<()> {
         .generate()
         .into_diagnostic()?;
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings.write_to_file(out_path.join("bindings.rs"))
         .into_diagnostic()?;
 
