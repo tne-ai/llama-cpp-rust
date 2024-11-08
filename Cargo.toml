@@ -1,0 +1,15 @@
+[package]
+name = "llama_cpp"
+description = "Rust bindings for Llama.cpp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+miette = { version = "7.2.0", features = ["fancy"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1" }
+
+[build-dependencies]
+cmake = "0.1"
+bindgen = "0.70"
+miette = { version = "7.2.0", features = ["fancy"] }
