@@ -16,9 +16,6 @@ name = "simple_chat"
 required-features = ["huggingface", "stream"]
 
 [[example]]
-name = "hf_download_model"
-
-[[example]]
 name = "chat_lora"
 
 [[example]]

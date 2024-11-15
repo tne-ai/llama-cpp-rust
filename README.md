@@ -17,9 +17,15 @@ cargo run --example simple_chat --features "huggingface,stream" -- \
 
 ## Tips
 
-### Download a model from 🤗 Hub and convert to GGUF format
+### Download a model from Hugging Face Hub and convert to GGUF format
 
-Use `huggingface-cli` to download a model from 🤗 Hub.
+Use `huggingface-cli` to download a model from Hugging Face Hub.
+
+First of all, let's install the Hugging Face CLI if not yet so.
+
+```shell
+pip install -U "huggingface_hub[cli]"
+```
 
 ```shell
 MODEL_ID=microsoft/Phi-3.5-mini-instruct
@@ -46,3 +52,5 @@ QUANT_TYPE=Q4_K_M
 
 ./llama-quantize ${MODEL_PATH} Phi-3.5-mini-instruct-${QUANT_TYPE}.gguf ${QUANT_TYPE}
 ```
+
+### Convert Hugging Face adapter into GGUF file
