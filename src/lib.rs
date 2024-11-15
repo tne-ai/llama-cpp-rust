@@ -23,14 +23,8 @@ use thiserror::Error;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-/// The type of result.
+/// The type of result being returned by llama-cpp-rust.
 pub type Result<T> = miette::Result<T>;
-
-#[derive(Debug, Error, Diagnostic)]
-pub enum Error {
-    #[error("unknown error")]
-    Unknown,
-}
 
 /// The type of token id.
 pub type Token = llama_token;
@@ -352,7 +346,7 @@ impl LlamaModel {
             llama_load_model_from_file(c_path_model.as_ptr(), model_params.pimpl)
         };
         if model.is_null() {
-            bail!(severity = Severity::Error, "unable to load the model")
+            bail!(severity = Severity::Error, "unable to load the model");
         }
 
         // Prepare the context from the given context or create from default params.
@@ -493,7 +487,10 @@ impl LlamaModel {
             // Decode a batch of tokens
             let ret = unsafe { llama_decode(lctx, batch) };
             if ret != 0 {
-                bail!("failed to decode input tokens");
+                bail!(
+                    severity = Severity::Error,
+                    "failed to decode input tokens",
+                );
             }
 
             let new_token_id_ = unsafe { llama_sampler_sample(sampler.pimpl, lctx, -1) };
@@ -688,7 +685,10 @@ impl LlamaModel {
 
                 Ok(())
             }
-            None => bail!("adapter `{}` is not present.", adapter_name.as_ref())
+            None => bail!(
+                severity = Severity::Warning,
+                "adapter `{}` is not present.", adapter_name.as_ref(),
+            )
         }
     }
 
@@ -1098,13 +1098,21 @@ impl LlamaTokenizer {
     }
 }
 
-/// LoRA adapter.
+/// The simple wrapper type of `llama_lora_adapter`.
 pub struct LoRAAdapter {
     pimpl: *mut llama_lora_adapter,
 }
 
 impl LoRAAdapter {
     /// Load a LoRA adapter from file.
+    ///
+    /// # Parameters
+    ///
+    /// `model`: A model.
+    /// `lora_path`: A path to LoRA adapter file.
+    ///
+    /// # Examples
+    ///
     pub fn load<P: AsRef<Path>>(model: &LlamaModel, lora_path: P) -> Result<Self> {
         let c_path_lora = CString::new(lora_path.as_ref().to_str().unwrap()).into_diagnostic()?;
         let adapter = unsafe { llama_lora_adapter_init(model.pimpl, c_path_lora.as_ptr()) };

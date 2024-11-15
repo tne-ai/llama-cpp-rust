@@ -2,6 +2,9 @@
 //!
 //! # Example
 //!
+//! The following command loads the [Phi-3-mini-4k-instruct-gguf](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/)
+//! from Hugging Face and start interactive chat prompt.
+//!
 //! ```bash
 //! cargo run --example simple_chat --features "huggingface,stream" -- \
 //!   --hf-repo microsoft/Phi-3-mini-4k-instruct-gguf \
