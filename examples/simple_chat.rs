@@ -1,16 +1,17 @@
-//! Simple Chat with Llama.cpp
+//! Simple Chat using Rust bindings of Llama.cpp.
 //!
 //! # Example
 //!
 //! ```bash
-//! cargo run --example chat --features "huggingface,stream" -- \
+//! cargo run --example simple_chat --features "huggingface,stream" -- \
 //!   --hf-repo microsoft/Phi-3-mini-4k-instruct-gguf \
-//!   --hf-model-path Phi-3-mini-4k-instruct-q4.gguf \
+//!   --model-path Phi-3-mini-4k-instruct-q4.gguf \
 //!   --top-p 0.9 \
 //!   --temperature 0.8
 //! ```
 
 use clap::Parser;
+use futures_util::{pin_mut, StreamExt};
 use llama_cpp::*;
 use miette::{bail, IntoDiagnostic, Result};
 use rustyline::error::ReadlineError;
@@ -29,10 +30,6 @@ struct Args {
     /// A 🤗Hub repoistory id where to download a model from.
     #[arg(long)]
     hf_repo: Option<String>,
-
-    /// A path to the GGUF model in the 🤗 Hub model repository.
-    #[arg(long)]
-    hf_model_path: Option<String>,
 
     /// A Git revision to download in the 🤗 Hub model repository.
     #[arg(long)]
@@ -74,41 +71,11 @@ struct Args {
 
     // Seed used by the sampler.
     #[arg(long, default_value_t = 42)]
-    seed: u32,
+    seed: u64,
 
     /// Output verbose outputs.
     #[arg(short, action, default_value_t = false)]
     verbose: bool,
-}
-
-struct PrintTextStream {
-    output: String,
-}
-
-impl PrintTextStream {
-    fn default() -> Self {
-        PrintTextStream { output: String::new() }
-    }
-
-    fn output(&self) -> String {
-        self.output.to_owned()
-    }
-}
-
-impl TextStreamer for PrintTextStream {
-    fn generated(&self, result: llama_cpp::Result<TextGenerationStream>) {
-        match result {
-            Ok(result) => {
-                if result.details.finish_reason == FinishReason::None {
-                    print!("{}", result.generated_text.as_str());
-                    io::stdout().flush().unwrap();
-                }
-            }
-            Err(err) => {
-                eprintln!("{}", err);
-            }
-        }
-    }
 }
 
 // https://github.com/ggerganov/llama.cpp/blob/master/examples/simple-chat/simple-chat.cpp
@@ -124,16 +91,16 @@ async fn main() -> Result<()> {
     let _handle = LlamaHandle::default();
 
     let model =
-        if let Some(model_path) = args.model_path {
-            println!("Loading the model {}", model_path);
-            LlamaModel::from_file(model_path, None, None)?
-        } else if let Some(repo_id) = args.hf_repo {
-            if let Some(model_path) = args.hf_model_path {
+        if let Some(repo_id) = args.hf_repo {
+            if let Some(model_path) = args.model_path {
                 println!("Loading the Hugging Face model {}/{}", repo_id, model_path);
                 LlamaModel::from_hf(repo_id, model_path, None, None, None).await?
             } else {
-                bail!("--hf-model-path must be set")
+                bail!("--model-path must be set")
             }
+        } else if let Some(model_path) = args.model_path {
+            println!("Loading the model {}", model_path);
+            LlamaModel::from_file(model_path, None, None)?
         } else {
             bail!("--model-path or --hf-repo must be set")
         };
@@ -162,12 +129,36 @@ async fn main() -> Result<()> {
         let readline = rl.readline(">> ");
         match readline {
             Ok(text) => {
+                if text.len() == 0 {
+                    continue;
+                }
+
                 messages.push(ChatMessage::new("user", &text));
 
-                let streamer = PrintTextStream::default();
-                model.generate_stream(&messages, &params, &streamer)?;
+                let mut output = String::new();
+                {
+                    let stream = model.generate_stream(&messages, &params);
+                    pin_mut!(stream);
 
-                messages.push(ChatMessage::new("assistant", streamer.output().as_str()));
+                    while let Some(ret) = stream.next().await {
+                        match ret {
+                            Ok(chunk) => {
+                                if chunk.details.finish_reason == FinishReason::Stop {
+                                    break;
+                                }
+                                print!("{}", chunk.generated_text);
+                                io::stdout().flush().unwrap();
+                                output.push_str(chunk.generated_text.as_str());
+                            }
+                            Err(err) => {
+                                eprintln!("{}", err);
+                            }
+                        }
+                    }
+                }
+
+                // Append assisnat's reply to the chat history.
+                messages.push(ChatMessage::new("assistant", output.as_str()));
                 println!();
             }
             Err(ReadlineError::Interrupted) => {

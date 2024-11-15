@@ -4,22 +4,33 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+#[cfg(feature = "stream")]
+use async_stream::try_stream;
+#[cfg(feature = "stream")]
+use futures_util::stream::Stream;
+
 use hf_hub::{Repo, RepoType};
 use log::{debug, error, info, warn};
-use miette::{bail, IntoDiagnostic, Severity};
+use miette::{bail, miette, Diagnostic, IntoDiagnostic, Severity};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::{Debug, Formatter};
-use std::io::Write;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
-use std::{env, fmt, io};
+use std::{env, fmt};
+use thiserror::Error;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 /// The type of result.
 pub type Result<T> = miette::Result<T>;
+
+#[derive(Debug, Error, Diagnostic)]
+pub enum Error {
+    #[error("unknown error")]
+    Unknown,
+}
 
 /// The type of token id.
 pub type Token = llama_token;
@@ -170,11 +181,6 @@ pub fn llama_set_log_level(log_level: LogLevel) {
     }
 }
 
-/// The callback type that is used on `LlamaModel::generate`.
-pub trait TextStreamer {
-    fn generated(&self, result: Result<TextGenerationStream>);
-}
-
 #[derive(Debug, Default)]
 pub struct GenerationParams {
     /// The number of highest probability vocabulary tokens to keep for top-k filtering.
@@ -202,7 +208,7 @@ pub struct GenerationParams {
     ///
     pub penalize_newline: Option<bool>,
     /// Seed used by the sampler.
-    pub seed: Option<u32>,
+    pub seed: Option<u64>,
 }
 
 /// The enumerable type to identify the reason why the model stopped generating tokens.
@@ -239,20 +245,23 @@ impl Debug for FinishReason {
 }
 
 #[derive(Debug)]
-pub struct GenerationDetails {
+pub struct GenerateDetails {
     pub finish_reason: FinishReason,
 }
 
 #[derive(Debug)]
 pub struct TextGeneration {
-    pub details: GenerationDetails,
+    pub details: GenerateDetails,
     pub generated_text: String,
 }
 
 #[derive(Debug)]
-pub struct TextGenerationStream {
-    pub details: GenerationDetails,
+pub struct GenerateStreamItem {
+    ///
+    pub details: GenerateDetails,
+    /// An index of current generated item.
     pub index: usize,
+    /// A chunk of generated text at the time.
     pub generated_text: String,
 }
 
@@ -346,6 +355,7 @@ impl LlamaModel {
             bail!(severity = Severity::Error, "unable to load the model")
         }
 
+        // Prepare the context from the given context or create from default params.
         let ctx = ctx.unwrap_or_else(|| {
             let ctx_params = unsafe { llama_context_default_params() };
             let ctx = unsafe { llama_new_context_with_model(model, ctx_params) };
@@ -353,6 +363,7 @@ impl LlamaModel {
         });
 
         let model = LlamaModel { ctx, pimpl: model, loras: HashMap::new() };
+
         Ok(model)
     }
 
@@ -456,6 +467,7 @@ impl LlamaModel {
         let prompt = tokenizer.apply_chat_template(self, messages, true)?;
         let mut input_ids = tokenizer.encode(self, &prompt, true, true)?;
 
+        // Prepare the single batch
         let mut batch = unsafe {
             llama_batch_get_one(input_ids.as_mut_ptr(), input_ids.len() as i32)
         };
@@ -469,7 +481,7 @@ impl LlamaModel {
             let n_ctx_used = unsafe { llama_get_kv_cache_used_cells(lctx) };
             if (n_ctx_used + batch.n_tokens) as u32 > n_ctx {
                 let result = TextGeneration {
-                    details: GenerationDetails {
+                    details: GenerateDetails {
                         finish_reason: FinishReason::MaxTokens,
                     },
                     generated_text: output,
@@ -514,11 +526,7 @@ impl LlamaModel {
             }
             buf.truncate(n as usize);
 
-            // DEBUG: Output to stdout
             let piece = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().into_diagnostic()?;
-            print!("{}", piece);
-            io::stdout().flush().unwrap();
-
             output.push_str(piece);
 
             // Prepare the next batch with the sampled token
@@ -526,7 +534,7 @@ impl LlamaModel {
         }
 
         Ok(TextGeneration {
-            details: GenerationDetails {
+            details: GenerateDetails {
                 finish_reason: FinishReason::Stop,
             },
             generated_text: output,
@@ -537,117 +545,93 @@ impl LlamaModel {
     ///
     /// # Parameters
     ///
+    /// * `messages`:
+    /// * `params`:
+    ///
     /// # Examples
     ///
+    /// ```rust,no_run
+    /// ```
     #[cfg(feature = "stream")]
-    pub fn generate_stream(
-        &self,
-        messages: &[ChatMessage],
-        params: &GenerationParams,
-        streamer: &impl TextStreamer,
-    ) -> Result<()> {
-        // ) -> impl Stream<Item=Result<TextGenerationStream>> {
-        // Prepare the sampler from the given params.
-        let sampler = Sampler::new(self, params);
+    pub fn generate_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        params: &'a GenerationParams,
+    ) -> impl Stream<Item=Result<GenerateStreamItem>> + 'a {
+        try_stream! {
+            // Prepare the sampler from the given parameters.
+            let sampler = Sampler::new(self, params);
 
-        // Tokenize the prompt
-        let tokenizer = LlamaTokenizer::new();
-        let prompt = tokenizer.apply_chat_template(self, messages, true).unwrap();
-        let mut input_ids = tokenizer.encode(self, &prompt, true, true).unwrap();
+            // Tokenize the prompt.
+            let tokenizer = LlamaTokenizer::new();
+            let prompt = tokenizer.apply_chat_template(self, messages, true)?;
+            let mut input_ids = tokenizer.encode(self, &prompt, true, true).unwrap();
 
-        // Configure the context parameters
-        let mut ctx_params = LlamaContextParams::default();
-        if let Some(n_ctx) = params.max_new_tokens {
-            let max_new_tokens = (n_ctx + input_ids.len()) as u32;
-            ctx_params.set_n_ctx(max_new_tokens);
-            ctx_params.set_n_batch(max_new_tokens);
-        }
-
-        // Initialize the context and batch
-        let ctx = LlamaContext::new(self, ctx_params).unwrap();
-        let mut batch = unsafe {
-            llama_batch_get_one(input_ids.as_mut_ptr(), input_ids.len() as i32)
-        };
-
-        let mut output = String::new();
-        let mut new_token_id = vec![0 as Token; 1];
-        let mut index = 0usize;
-
-        loop {
-            // Check if we have enough space in the context
-            let n_ctx = unsafe { llama_n_ctx(ctx.pimpl) };
-            let n_ctx_used = unsafe { llama_get_kv_cache_used_cells(ctx.pimpl) };
-            if (n_ctx_used + batch.n_tokens) as u32 > n_ctx {
-                let result = TextGenerationStream {
-                    details: GenerationDetails {
-                        finish_reason: FinishReason::MaxTokens,
-                    },
-                    index,
-                    generated_text: output.to_owned(),
-                };
-                streamer.generated(Ok(result));
-
-                return Ok(());
+            // Configure the context parameters
+            let mut ctx_params = LlamaContextParams::default();
+            if let Some(n_ctx) = params.max_new_tokens {
+                let max_new_tokens = (n_ctx + input_ids.len()) as u32;
+                ctx_params.set_n_ctx(max_new_tokens);
+                ctx_params.set_n_batch(max_new_tokens);
             }
+            let ctx = LlamaContext::new(self, ctx_params)?;
 
-            // Decode a batch of tokens
-            let ret = unsafe { llama_decode(ctx.pimpl, batch) };
-            if ret != 0 {
-                bail!("failed to decode input tokens");
-            }
-            let new_token_id_ = unsafe { llama_sampler_sample(sampler.pimpl, ctx.pimpl, -1) };
+            // Configure the single batch from the given prompt.
+            let mut batch = unsafe {
+                llama_batch_get_one(input_ids.as_mut_ptr(), input_ids.len() as i32)
+            };
 
-            // Accepting the token pdates the internal state of certain samplers.
-            unsafe { llama_sampler_accept(sampler.pimpl, new_token_id_) };
+            let mut new_token_ids = vec![0 as Token; 1];
+            let mut index = 0usize;
 
-            let is_eog = unsafe { llama_token_is_eog(self.pimpl, new_token_id_) };
-            if is_eog {
-                let stream_result = TextGenerationStream {
-                    details: GenerationDetails {
-                        finish_reason: FinishReason::Stop,
-                    },
-                    index,
-                    generated_text: "".to_owned(),
-                };
-                streamer.generated(Ok(stream_result));
-
-                return Ok(());
-            } else {
-                // Convert the token to a string.
-                let mut buf = vec![0 as c_char; 256];
-                let n = unsafe {
-                    llama_token_to_piece(
-                        self.pimpl,
-                        new_token_id_,
-                        buf.as_mut_ptr(),
-                        buf.len() as i32,
-                        0,
-                        true,
-                    )
-                };
-                if n < 0 {
-                    bail!(
-                        severity = Severity::Error,
-                        "failed to convert token to piece",
-                    );
+            loop {
+                // Check if we have enough space in the context
+                let n_ctx = unsafe { llama_n_ctx(ctx.pimpl) };
+                let n_ctx_used = unsafe { llama_get_kv_cache_used_cells(ctx.pimpl) };
+                if (n_ctx_used + batch.n_tokens) as u32 > n_ctx {
+                    yield GenerateStreamItem {
+                        details: GenerateDetails {
+                            finish_reason: FinishReason::MaxTokens,
+                        },
+                        index,
+                        generated_text: "".to_owned(),
+                    };
+                    break;
                 }
-                buf.truncate(n as usize);
 
-                let piece = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().into_diagnostic()?;
-                let stream_result = TextGenerationStream {
-                    details: GenerationDetails {
+                // Decode a batch of tokens
+                self.decode_batch(&ctx, batch)?;
+
+                let new_token_id = unsafe { llama_sampler_sample(sampler.pimpl, ctx.pimpl, -1) };
+
+                // Accepting the token pdates the internal state of certain samplers.
+                unsafe { llama_sampler_accept(sampler.pimpl, new_token_id) };
+
+                let is_eog = unsafe { llama_token_is_eog(self.pimpl, new_token_id) };
+                if is_eog {
+                    yield GenerateStreamItem {
+                        details: GenerateDetails {
+                            finish_reason: FinishReason::Stop,
+                        },
+                        index,
+                        generated_text: "".to_owned(),
+                    };
+                    break;
+                }
+
+                // Convert the token to a string.
+                let piece = tokenizer.convert_token_to_piece(self, new_token_id, true)?;
+                yield GenerateStreamItem {
+                    details: GenerateDetails {
                         finish_reason: FinishReason::None,
                     },
                     index,
                     generated_text: piece.to_owned(),
                 };
-                streamer.generated(Ok(stream_result));
-
-                output.push_str(piece);
 
                 // Prepare the next batch with the sampled token
-                new_token_id[0] = new_token_id_;
-                batch = unsafe { llama_batch_get_one(new_token_id.as_mut_ptr(), 1) };
+                new_token_ids[0] = new_token_id;
+                batch = unsafe { llama_batch_get_one(new_token_ids.as_mut_ptr(), 1) };
 
                 index += 1;
             }
@@ -714,6 +698,14 @@ impl LlamaModel {
         self.loras.clear();
 
         Ok(())
+    }
+
+    fn decode_batch(&self, ctx: &LlamaContext, batch: llama_batch) -> Result<()> {
+        match unsafe { llama_decode(ctx.pimpl, batch) } {
+            0 => Ok(()),
+            1 => Err(miette!("Try reducing the size of the batch or increase the context size.")),
+            _ => Err(miette!("failed to decode batch"))
+        }
     }
 }
 
@@ -1090,23 +1082,18 @@ impl LlamaTokenizer {
         Ok(text)
     }
 
-    ///
-    pub fn decode_batch(&self) {
-        todo!()
-    }
-
     /// Convert token id to text.
     pub fn convert_token_to_piece(&self, model: &LlamaModel, token: Token, skip_special: bool) -> Result<String> {
-        let mut buf = vec![0; 128];
+        let mut buf = vec![0; 256];
         let n_chars = unsafe {
-            llama_token_to_piece(model.pimpl, token, buf.as_mut_ptr(), 127, 0, !skip_special)
+            llama_token_to_piece(model.pimpl, token, buf.as_mut_ptr(), 256, 0, skip_special)
         };
         if n_chars < 0 {
             bail!("failed to convert token to piece")
         } else {
             buf.truncate(n_chars as usize);
-            let piece = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().expect("unable to decode").to_owned();
-            Ok(piece)
+            let piece = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().expect("unable to decode");
+            Ok(piece.to_owned())
         }
     }
 }
@@ -1200,7 +1187,7 @@ impl Sampler {
             );
         }
         if params.do_sample {
-            sampler.add_dist(params.seed.unwrap_or(LLAMA_DEFAULT_SEED));
+            sampler.add_dist(params.seed.unwrap_or(LLAMA_DEFAULT_SEED as u64) as u32);
         } else {
             sampler.add_greedy();
         }
@@ -1353,6 +1340,7 @@ impl SamplerChainParams {
 /// Input data that can contain inputs about one or many sequences.
 pub struct LlamaBatch {
     pimpl: llama_batch,
+    need_free: bool,
 }
 
 impl LlamaBatch {
@@ -1376,8 +1364,8 @@ impl LlamaBatch {
 
 impl Drop for LlamaBatch {
     fn drop(&mut self) {
-        unsafe {
-            llama_batch_free(self.pimpl)
+        if self.need_free {
+            unsafe { llama_batch_free(self.pimpl) }
         }
     }
 }
@@ -1424,7 +1412,7 @@ mod tests {
 
     #[test]
     fn test_model_from_file() -> Result<()> {
-        LlamaModel::from_file(TEST_MODEL_PATH, None)?;
+        LlamaModel::from_file(TEST_MODEL_PATH, None, None)?;
 
         let err_model = LlamaModel::from_file("/path/to/invalid.gguf", None, None);
         assert!(err_model.is_err());
@@ -1486,7 +1474,7 @@ mod tests {
     #[test]
     fn test_tokenizer_convert_token_to_piece() -> Result<()> {
         let _handle = LlamaHandle::default();
-        let model = LlamaModel::from_file(TEST_MODEL_PATH, None)?;
+        let model = LlamaModel::from_file(TEST_MODEL_PATH, None, None)?;
         let tokenizer = LlamaTokenizer::new();
         let tokens = tokenizer.encode(&model, "Hello Llama", true, true)?;
         for token in tokens {
@@ -1499,7 +1487,7 @@ mod tests {
 
     #[test]
     fn test_tokenizer_apply_chat_template() -> Result<()> {
-        let model = LlamaModel::from_file(TEST_MODEL_PATH, None)?;
+        let model = LlamaModel::from_file(TEST_MODEL_PATH, None, None)?;
         let tokenizer = LlamaTokenizer::new();
         let messages = vec![
             ChatMessage::new("system", "You are helpful AI assistant."),
@@ -1511,22 +1499,5 @@ mod tests {
 
         Ok(())
     }
-
-    // #[test]
-    // fn test_batch_single() {
-    //     // let model = Rc::new(LlamaModel::from_file(TEST_MODEL_PATH, LlamaModelParams::default())?);
-    //     // let ctx_params = LlamaContextParams::default();
-    //     // let ctx = LlamaContext::new(&model, &ctx_params);
-    //     let mut token_ids: [Token; 4] = [1, 15043, 365, 29880];
-    //     let batch = LlamaBatch::single(&mut token_ids);
-    //     assert_eq!(batch.n_tokens(), 4);
-    // }
-    //
-    // #[test]
-    // fn test_batch_token_ids() {
-    //     let mut token_ids: [Token; 4] = [1, 15043, 365, 29880];
-    //     let batch = LlamaBatch::single(&mut token_ids);
-    //     assert_eq!(batch.token_ids(), token_ids);
-    // }
 }
 

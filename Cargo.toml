@@ -29,15 +29,19 @@ miette = { version = "7.2.0", features = ["fancy"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 async-stream = { version = "0.3.6", optional = true }
-futures-util = { version = "0.3.31", optional = true }
+futures-util = { version = "0.3", optional = true }
 lazy_static = "1.5.0"
 log = "0.4.22"
 hf-hub = { version = "0.3.2", features = ["tokio"], optional = true }
+validify = "1.4.0"
+axum-valid = { version = "0.21", default-features = false, features = ["validify", "basic"] }
+thiserror = "2.0"
 
 [dev-dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rustyline = "14.0.0"
 axum = "0.7.7"
+axum-valid = "0.21"
 tower-http = { version = "0.6", features = ["cors"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
