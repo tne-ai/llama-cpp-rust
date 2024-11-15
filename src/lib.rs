@@ -26,6 +26,18 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// The type of result being returned by llama-cpp-rust.
 pub type Result<T> = miette::Result<T>;
 
+#[derive(Error, Diagnostic, Debug)]
+pub enum Error {
+    #[error("{0}")]
+    #[diagnostic(severity(Warning))]
+    InvalidInput(String),
+    #[error("{0}")]
+    #[diagnostic(severity(Error))]
+    OutOfMemory(String),
+    #[error("unknown error")]
+    Other(String),
+}
+
 /// The type of token id.
 pub type Token = llama_token;
 
@@ -346,7 +358,8 @@ impl LlamaModel {
             llama_load_model_from_file(c_path_model.as_ptr(), model_params.pimpl)
         };
         if model.is_null() {
-            bail!(severity = Severity::Error, "unable to load the model");
+            let msg = format!("unable to load the model `{}`", model_path.as_ref().to_str().unwrap());
+            return Err(Error::InvalidInput(msg).into());
         }
 
         // Prepare the context from the given context or create from default params.
@@ -449,12 +462,20 @@ impl LlamaModel {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use llama_cpp::LlamaModel;
+    /// use llama_cpp::{ChatMessage, GenerationParams, LlamaModel};
+    ///
+    /// // Load a Phi-3.5-mini-instruct model in the current directory.
+    /// let model = LlamaModel::from_file("Phi-3.5-mini-instruct-Q4_K_M.gguf", None, None)?;
+    /// let messages = &[
+    ///     ChatMessage::new("user", "How to cook Pasta alla Trapanese?"),
+    /// ];
+    ///
+    /// let generated = model.generate(&messages, GenerationParams::default())?;
     /// ```
     ///
-    pub fn generate(&self, messages: &[ChatMessage], params: &GenerationParams) -> Result<TextGeneration> {
+    pub fn generate(&self, messages: &[ChatMessage], params: GenerationParams) -> Result<TextGeneration> {
         // Prepare the sampler from the given params
-        let sampler = Sampler::new(self, params);
+        let sampler = Sampler::new(self, &params);
 
         // Tokenize the prompt
         let tokenizer = LlamaTokenizer::new();
@@ -647,7 +668,7 @@ impl LlamaModel {
     ///
     /// # Examples
     ///
-    pub fn load_adapter<P: AsRef<Path>, S: AsRef<str>>(
+    pub fn load_lora_adapter<P: AsRef<Path>, S: AsRef<str>>(
         &mut self,
         lora_path: P,
         adapter_name: S,
@@ -677,7 +698,7 @@ impl LlamaModel {
     ///
     /// # Examples
     ///
-    pub fn remove_adapter<S: AsRef<str>>(&mut self, adapter_name: S) -> Result<()> {
+    pub fn remove_lora_adapter<S: AsRef<str>>(&mut self, adapter_name: S) -> Result<()> {
         match self.loras.get(adapter_name.as_ref()) {
             Some(lora) => {
                 unsafe { llama_lora_adapter_remove(self.ctx.pimpl, lora.adapter); };
@@ -693,7 +714,7 @@ impl LlamaModel {
     }
 
     /// Clear all LoRA adapters.
-    pub fn remove_adapters(&mut self) -> Result<()> {
+    pub fn remove_lora_adapters(&mut self) -> Result<()> {
         unsafe { llama_lora_adapter_clear(self.ctx.pimpl) };
         self.loras.clear();
 
@@ -1098,44 +1119,13 @@ impl LlamaTokenizer {
     }
 }
 
-/// The simple wrapper type of `llama_lora_adapter`.
-pub struct LoRAAdapter {
-    pimpl: *mut llama_lora_adapter,
-}
-
-impl LoRAAdapter {
-    /// Load a LoRA adapter from file.
-    ///
-    /// # Parameters
-    ///
-    /// `model`: A model.
-    /// `lora_path`: A path to LoRA adapter file.
-    ///
-    /// # Examples
-    ///
-    pub fn load<P: AsRef<Path>>(model: &LlamaModel, lora_path: P) -> Result<Self> {
-        let c_path_lora = CString::new(lora_path.as_ref().to_str().unwrap()).into_diagnostic()?;
-        let adapter = unsafe { llama_lora_adapter_init(model.pimpl, c_path_lora.as_ptr()) };
-        if adapter.is_null() {
-            bail!("failed to load LoRA adapter")
-        }
-
-        Ok(LoRAAdapter { pimpl: adapter })
-    }
-}
-
-impl Drop for LoRAAdapter {
-    fn drop(&mut self) {
-        unsafe { llama_lora_adapter_free(self.pimpl) }
-    }
-}
-
+/// The wrapper type of `llama_sampler`.
 pub struct Sampler {
     pimpl: *mut llama_sampler,
 }
 
 impl Sampler {
-    /// Returns a sampler.
+    /// Returns a barebones sampler.
     pub fn default() -> Self {
         let pimpl = unsafe {
             let sparams = llama_sampler_chain_default_params();
@@ -1389,14 +1379,11 @@ pub enum ModelKVOverrideType {
 mod tests {
     use super::*;
 
-    const TEST_MODEL_PATH: &str = "/tmp/Phi-3-mini-4k-instruct-gguf/Phi-3-mini-4k-instruct-q4.gguf";
-
+    const TEST_MODEL_PATH: &'static str = "./models/Phi-3.5-mini-instruct-Q4_K_M.gguf";
+    const TEST_LORA_PATH: &'static str = "./models/Phi3.5-mini-F16-LoRA.gguf";
     #[test]
-    fn test_set_log_level() -> Result<()> {
-        // llama_set_log_level(LogLevel::Error);
-        let _model = LlamaModel::from_file(TEST_MODEL_PATH, None, None)?;
-
-        Ok(())
+    fn test_set_log_level() {
+        llama_set_log_level(LogLevel::Error);
     }
 
     #[cfg(feature = "huggingface")]
@@ -1428,26 +1415,31 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "huggingface")]
-    #[tokio::test]
-    async fn test_model_generate() -> Result<()> {
-        let model = LlamaModel::from_hf(
-            "microsoft/Phi-3-mini-4k-instruct-gguf",
-            "Phi-3-mini-4k-instruct-q4.gguf",
-            None,
-            None,
-            None,
-        ).await?;
+    #[test]
+    fn test_model_generate() -> Result<()> {
+        let model = LlamaModel::from_file(TEST_MODEL_PATH, None, None)?;
         let messages = vec![
             ChatMessage::new("system", "You are a helpful assistant."),
             ChatMessage::new("user", "What can you help me?"),
         ];
         let mut params = GenerationParams::default();
-        params.max_new_tokens = Some(1024);
-        let output = model.generate(&messages, &params)?;
-
+        params.max_new_tokens = Some(2048);
+        let output = model.generate(&messages, params)?;
+        // println!("{:?}", output);
         assert_eq!(output.details.finish_reason, FinishReason::Stop);
         assert!(output.generated_text.len() > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_lora_adapter() -> Result<()> {
+        let _handle = LlamaHandle::default();
+
+        let mut model = LlamaModel::from_file(TEST_MODEL_PATH, None, None)?;
+        let adapter_name = "test";
+        model.load_lora_adapter(TEST_LORA_PATH, adapter_name, 0.5)?;
+        model.remove_lora_adapter(adapter_name)?;
 
         Ok(())
     }
@@ -1459,8 +1451,6 @@ mod tests {
 
     #[test]
     fn test_sampler_chain() -> Result<()> {
-        let mut sparams = SamplerChainParams::default();
-
         let mut sampler = Sampler::default();
         sampler.set_top_k(10);
         sampler.add_greedy();
