@@ -1,27 +1,40 @@
-use async_stream::stream as async_stream;
+use async_stream::{stream as async_stream, try_stream};
 use axum::error_handling::HandleError;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::sse::KeepAlive;
+use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::builder::Str;
 use clap::Parser;
-use futures_util::Stream;
-use llama_cpp::{llama_set_log_level, ChatMessage, GenerateStreamItem, GenerationParams, LlamaHandle, LlamaModel, LlamaTokenizer, LogLevel, TextStreamer};
+use futures_util::{pin_mut, Stream, StreamExt};
+use llama_cpp::{
+    llama_set_log_level,
+    ChatMessage,
+    FinishReason,
+    GenerateStreamItem,
+    GenerationParams,
+    LlamaHandle,
+    LlamaModel,
+    LlamaTokenizer,
+    LogLevel,
+};
 use miette::{IntoDiagnostic, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::info;
+use tracing::{error, info};
 
 type ModelRegistry<Model> = HashMap<String, Arc<Model>>;
 
-#[derive(Clone, Default)]
-struct AppState {}
+#[derive(Clone)]
+struct AppState {
+    model: Arc<LlamaModel>,
+}
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -33,6 +46,7 @@ struct Args {
     /// Server port
     #[arg(short, long, default_value_t = 8900)]
     port: u16,
+
 }
 
 // -------------------------------------------------------------------
@@ -56,8 +70,8 @@ struct GenerateParameters {
 #[derive(Serialize, Default, Debug)]
 struct GenerateDetails {
     finish_reason: String,
-    generated_tokens: i32,
-    seed: i64,
+    // generated_tokens: i32,
+    // seed: i64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -70,6 +84,7 @@ struct GenerateRequest {
 
 #[derive(Serialize, Default)]
 struct GenerateResponse {
+    details: GenerateDetails,
     generated_text: String,
 }
 
@@ -84,13 +99,13 @@ async fn generate(
     State(state): State<AppState>,
     Json(request): Json<GenerateRequest>,
 ) -> impl IntoResponse {
-    let model_path = "./Phi-3-mini-4k-instruct-q4.gguf";
-    let model = LlamaModel::from_file(model_path, None, None).expect("failed to load model");
+    // TODO:
+
     let tokenizer = LlamaTokenizer::new();
     let messages = [
         ChatMessage::new("user", request.inputs.as_str()),
     ];
-    let prompt = tokenizer.apply_chat_template(&model, &messages, true).expect("failed to apply chat template");
+    let prompt = tokenizer.apply_chat_template(state.model.as_ref(), &messages, true).expect("failed to apply chat template");
     let mut gen_params = GenerationParams::default();
     if let Some(params) = request.parameters.as_ref() {
         gen_params.top_p = params.top_p;
@@ -102,19 +117,31 @@ async fn generate(
     }
 
     if request.stream.unwrap_or(false) {
-        // let streamer = Box::pin(async_stream! {
-        //     yield "OK";
-        // });
-        //
-        // // model.generate_stream(&messages, &gen_params).expect("failed to generate stream");
-        //
-        // Sse::new(streamer)
-        //     .keep_alive(KeepAlive::default())
-        //     .into_response()
-        "".into_response()
+        let streamer = Box::pin(async_stream! {
+            let stream = state.model.generate_stream(&messages, &gen_params);
+            pin_mut!(stream);
+
+            while let Some(Ok(chunk)) = stream.next().await {
+                let data = GenerateResponse {
+                    details: GenerateDetails {
+                        finish_reason: chunk.details.finish_reason.as_str().to_owned(),
+                    },
+                    generated_text: chunk.generated_text.to_owned(),
+                };
+                let event: Result<Event, fmt::Error> = Ok(Event::default().json_data(data).unwrap());
+                yield event;
+            }
+        });
+
+        Sse::new(streamer)
+            .keep_alive(KeepAlive::default())
+            .into_response()
     } else {
-        let output = model.generate(&messages, &gen_params).expect("failed to generate");
+        let output = state.model.generate(&messages, gen_params).expect("failed to generate");
         let response = GenerateResponse {
+            details: GenerateDetails {
+                finish_reason: "stop".to_owned(),
+            },
             generated_text: output.generated_text,
         };
 
@@ -147,11 +174,16 @@ async fn main() {
 
     let _handle = LlamaHandle::default();
 
-    let mut state = AppState::default();
+    let model_path = "./models/Phi-3.5-mini-instruct-Q4_K_M.gguf";
+    let model = LlamaModel::from_file(model_path, None, None).expect("failed to load model");
+
+    let mut state = AppState {
+        model: Arc::new(model),
+    };
+
     let router = Router::new()
         // .route("/models", get(list_models))
         .route("/generate", post(generate))
-        // .route("/generate_stream", post(generate_stream))
         // .route("/v1/chat/completions", post(chat_completion))
         // .route("/lora/adapters", get(list_lora_adapters))
         .with_state(state)

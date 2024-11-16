@@ -256,7 +256,7 @@ pub struct GenerateDetails {
 }
 
 #[derive(Debug)]
-pub struct TextGeneration {
+pub struct GenerateOutput {
     pub details: GenerateDetails,
     pub generated_text: String,
 }
@@ -276,6 +276,8 @@ struct LoRA {
     adapter: *mut llama_lora_adapter,
     scale: f32,
 }
+
+unsafe impl Send for LoRA {}
 
 ///
 pub struct LlamaModel {
@@ -457,8 +459,6 @@ impl LlamaModel {
     /// * `messages`: The list of input messages.
     /// * `params`: The parameters of text generation.
     ///
-    /// # Returns
-    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -471,9 +471,10 @@ impl LlamaModel {
     /// ];
     ///
     /// let generated = model.generate(&messages, GenerationParams::default())?;
+    /// println!("{:?}", generated);
     /// ```
     ///
-    pub fn generate(&self, messages: &[ChatMessage], params: GenerationParams) -> Result<TextGeneration> {
+    pub fn generate(&self, messages: &[ChatMessage], params: GenerationParams) -> Result<GenerateOutput> {
         // Prepare the sampler from the given params
         let sampler = Sampler::new(self, &params);
 
@@ -495,7 +496,7 @@ impl LlamaModel {
             let n_ctx = unsafe { llama_n_ctx(lctx) };
             let n_ctx_used = unsafe { llama_get_kv_cache_used_cells(lctx) };
             if (n_ctx_used + batch.n_tokens) as u32 > n_ctx {
-                let result = TextGeneration {
+                let result = GenerateOutput {
                     details: GenerateDetails {
                         finish_reason: FinishReason::MaxTokens,
                     },
@@ -551,7 +552,7 @@ impl LlamaModel {
             batch = unsafe { llama_batch_get_one(new_token_id.as_mut_ptr(), 1) };
         }
 
-        Ok(TextGeneration {
+        Ok(GenerateOutput {
             details: GenerateDetails {
                 finish_reason: FinishReason::Stop,
             },
@@ -736,6 +737,9 @@ impl fmt::Display for LlamaModel {
     }
 }
 
+unsafe impl Send for LlamaModel {}
+unsafe impl Sync for LlamaModel {}
+
 impl Drop for LlamaModel {
     fn drop(&mut self) {
         unsafe {
@@ -747,6 +751,7 @@ impl Drop for LlamaModel {
 pub struct LlamaContext {
     pimpl: *mut llama_context,
 }
+
 
 impl LlamaContext {
     pub fn new(model: &LlamaModel, params: LlamaContextParams) -> Result<Self> {
@@ -781,6 +786,8 @@ impl LlamaContext {
         }
     }
 }
+
+unsafe impl Send for LlamaContext {}
 
 impl Drop for LlamaContext {
     fn drop(&mut self) {
@@ -931,6 +938,8 @@ impl LlamaContextParams {
         self.pimpl.no_perf = value;
     }
 }
+
+unsafe impl Send for LlamaContextParams {}
 
 impl Into<llama_context_params> for LlamaContextParams {
     fn into(self) -> llama_context_params {
@@ -1123,6 +1132,8 @@ impl LlamaTokenizer {
 pub struct Sampler {
     pimpl: *mut llama_sampler,
 }
+
+unsafe impl Send for Sampler {}
 
 impl Sampler {
     /// Returns a barebones sampler.
