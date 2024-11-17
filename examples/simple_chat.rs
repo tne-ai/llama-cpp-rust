@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
                     while let Some(ret) = stream.next().await {
                         match ret {
                             Ok(chunk) => {
-                                if chunk.details.finish_reason == FinishReason::Stop {
+                                if chunk.details.finish_reason == Some(FinishReason::Stop) {
                                     break;
                                 }
                                 print!("{}", chunk.generated_text);

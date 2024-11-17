@@ -8,7 +8,7 @@
 use async_stream::try_stream;
 #[cfg(feature = "stream")]
 use futures_util::stream::Stream;
-
+#[cfg(feature = "huggingface")]
 use hf_hub::{Repo, RepoType};
 use log::{debug, error, info, warn};
 use miette::{bail, miette, Diagnostic, IntoDiagnostic, Severity};
@@ -47,10 +47,18 @@ pub struct LlamaHandle {}
 impl LlamaHandle {
     /// Returns the default handle.
     pub fn default() -> Self {
+        llama_set_log_level(LogLevel::Error);
         unsafe {
             llama_backend_init();
         }
         LlamaHandle {}
+    }
+
+    /// Set the log level for Llama.cpp.
+    pub fn set_log_level(&self, level: LogLevel) {
+        unsafe {
+            llama_set_log_level(level.into())
+        }
     }
 }
 
@@ -220,7 +228,6 @@ pub struct GenerationParams {
 /// The enumerable type to identify the reason why the model stopped generating tokens.
 #[derive(Eq, PartialEq)]
 pub enum FinishReason {
-    None,
     /// Token generation reached a natural stopping point or a configured stop sequence.
     Stop,
     /// Token generation reached the configured maximum output tokens.
@@ -235,7 +242,6 @@ impl FinishReason {
     /// Returns the string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
-            FinishReason::None => "",
             FinishReason::Stop => "stop",
             FinishReason::MaxTokens => "max_tokens",
             FinishReason::Safety => "safety",
@@ -252,7 +258,7 @@ impl Debug for FinishReason {
 
 #[derive(Debug)]
 pub struct GenerateDetails {
-    pub finish_reason: FinishReason,
+    pub finish_reason: Option<FinishReason>,
 }
 
 #[derive(Debug)]
@@ -498,7 +504,7 @@ impl LlamaModel {
             if (n_ctx_used + batch.n_tokens) as u32 > n_ctx {
                 let result = GenerateOutput {
                     details: GenerateDetails {
-                        finish_reason: FinishReason::MaxTokens,
+                        finish_reason: Some(FinishReason::MaxTokens),
                     },
                     generated_text: output,
                 };
@@ -554,7 +560,7 @@ impl LlamaModel {
 
         Ok(GenerateOutput {
             details: GenerateDetails {
-                finish_reason: FinishReason::Stop,
+                finish_reason: Some(FinishReason::Stop),
             },
             generated_text: output,
         })
@@ -610,7 +616,7 @@ impl LlamaModel {
                 if (n_ctx_used + batch.n_tokens) as u32 > n_ctx {
                     yield GenerateStreamItem {
                         details: GenerateDetails {
-                            finish_reason: FinishReason::MaxTokens,
+                            finish_reason: Some(FinishReason::MaxTokens),
                         },
                         index,
                         generated_text: "".to_owned(),
@@ -630,7 +636,7 @@ impl LlamaModel {
                 if is_eog {
                     yield GenerateStreamItem {
                         details: GenerateDetails {
-                            finish_reason: FinishReason::Stop,
+                            finish_reason: Some(FinishReason::Stop),
                         },
                         index,
                         generated_text: "".to_owned(),
@@ -642,7 +648,7 @@ impl LlamaModel {
                 let piece = tokenizer.convert_token_to_piece(self, new_token_id, true)?;
                 yield GenerateStreamItem {
                     details: GenerateDetails {
-                        finish_reason: FinishReason::None,
+                        finish_reason: None,
                     },
                     index,
                     generated_text: piece.to_owned(),
@@ -1437,7 +1443,7 @@ mod tests {
         params.max_new_tokens = Some(2048);
         let output = model.generate(&messages, params)?;
         // println!("{:?}", output);
-        assert_eq!(output.details.finish_reason, FinishReason::Stop);
+        assert_eq!(output.details.finish_reason, Some(FinishReason::Stop));
         assert!(output.generated_text.len() > 0);
 
         Ok(())

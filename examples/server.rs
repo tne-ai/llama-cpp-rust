@@ -1,3 +1,11 @@
+//! Simple inference server.
+//!
+//! # Example
+//!
+//! ```bash
+//! cargo run --example server -- \
+//!   --model-path ./Phi-3.5-mini-instruct-Q4_K_M.gguf
+//! ```
 use async_stream::{stream as async_stream, try_stream};
 use axum::error_handling::HandleError;
 use axum::extract::State;
@@ -47,6 +55,9 @@ struct Args {
     #[arg(short, long, default_value_t = 8900)]
     port: u16,
 
+    /// A path to GGUF model file.
+    #[arg(long)]
+    model_path: String,
 }
 
 // -------------------------------------------------------------------
@@ -69,7 +80,7 @@ struct GenerateParameters {
 
 #[derive(Serialize, Default, Debug)]
 struct GenerateDetails {
-    finish_reason: String,
+    finish_reason: Option<String>,
     // generated_tokens: i32,
     // seed: i64,
 }
@@ -124,7 +135,7 @@ async fn generate(
             while let Some(Ok(chunk)) = stream.next().await {
                 let data = GenerateResponse {
                     details: GenerateDetails {
-                        finish_reason: chunk.details.finish_reason.as_str().to_owned(),
+                        finish_reason: chunk.details.finish_reason.map_or(None, |r| Some(r.as_str().to_owned())),
                     },
                     generated_text: chunk.generated_text.to_owned(),
                 };
@@ -140,7 +151,7 @@ async fn generate(
         let output = state.model.generate(&messages, gen_params).expect("failed to generate");
         let response = GenerateResponse {
             details: GenerateDetails {
-                finish_reason: "stop".to_owned(),
+                finish_reason: Some("stop".to_owned()),
             },
             generated_text: output.generated_text,
         };
@@ -170,12 +181,13 @@ async fn main() {
     tracing_subscriber::fmt::init();
     llama_set_log_level(LogLevel::Error);
 
+    let handle = LlamaHandle::default();
+    handle.set_log_level(LogLevel::Warn);
+
     let args = Args::parse();
 
-    let _handle = LlamaHandle::default();
-
-    let model_path = "./models/Phi-3.5-mini-instruct-Q4_K_M.gguf";
-    let model = LlamaModel::from_file(model_path, None, None).expect("failed to load model");
+    let model = LlamaModel::from_file(args.model_path, None, None)
+        .expect("failed to load model");
 
     let mut state = AppState {
         model: Arc::new(model),
