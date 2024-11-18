@@ -17,17 +17,7 @@ use axum::{Json, Router};
 use clap::builder::Str;
 use clap::Parser;
 use futures_util::{pin_mut, Stream, StreamExt};
-use llama_cpp::{
-    llama_set_log_level,
-    ChatMessage,
-    FinishReason,
-    GenerateStreamItem,
-    GenerationParams,
-    LlamaHandle,
-    LlamaModel,
-    LlamaTokenizer,
-    LogLevel,
-};
+use llama_cpp::{llama_set_log_level, ChatMessage, FinishReason, GenerateStreamItem, GenerationParams, LlamaContext, LlamaContextParams, LlamaHandle, LlamaModel, LlamaTokenizer, LogLevel};
 use miette::{IntoDiagnostic, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -186,7 +176,11 @@ async fn main() {
 
     let args = Args::parse();
 
-    let model = LlamaModel::from_file(args.model_path, None, None)
+    let mut ctx_params = LlamaContextParams::default();
+    ctx_params.set_n_ctx(4096);
+    ctx_params.set_n_batch(4096);
+
+    let model = LlamaModel::from_file(args.model_path, None, Some(ctx_params))
         .expect("failed to load model");
 
     let mut state = AppState {

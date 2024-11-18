@@ -56,9 +56,7 @@ impl LlamaHandle {
 
     /// Set the log level for Llama.cpp.
     pub fn set_log_level(&self, level: LogLevel) {
-        unsafe {
-            llama_set_log_level(level.into())
-        }
+        llama_set_log_level(level.into())
     }
 }
 
@@ -322,7 +320,7 @@ impl LlamaModel {
         model_path: S,
         revision: Option<S>,
         model_params: Option<LlamaModelParams>,
-        ctx: Option<LlamaContext>,
+        ctx_params: Option<LlamaContextParams>,
     ) -> Result<Self> {
         let api = hf_hub::api::tokio::ApiBuilder::new()
             .with_token(env::var("HF_TOKEN").ok())
@@ -335,7 +333,7 @@ impl LlamaModel {
         };
         let model_path = api.repo(repo).get(model_path.as_ref()).await.into_diagnostic()?;
 
-        LlamaModel::from_file(model_path.as_path(), model_params, ctx)
+        LlamaModel::from_file(model_path.as_path(), model_params, ctx_params)
     }
 
     /// Load a model from the file.
@@ -358,7 +356,7 @@ impl LlamaModel {
     pub fn from_file<P: AsRef<Path>>(
         model_path: P,
         model_params: Option<LlamaModelParams>,
-        ctx: Option<LlamaContext>,
+        ctx_params: Option<LlamaContextParams>,
     ) -> Result<Self> {
         let model_params = model_params.unwrap_or(LlamaModelParams::default());
         let c_path_model = CString::new(model_path.as_ref().to_str().unwrap()).unwrap();
@@ -371,15 +369,12 @@ impl LlamaModel {
         }
 
         // Prepare the context from the given context or create from default params.
-        let ctx = ctx.unwrap_or_else(|| {
-            let ctx_params = unsafe { llama_context_default_params() };
-            let ctx = unsafe { llama_new_context_with_model(model, ctx_params) };
-            LlamaContext { pimpl: ctx }
-        });
+        let ctx_params = ctx_params.unwrap_or(LlamaContextParams::default());
+        let ctx = LlamaContext {
+            pimpl: unsafe { llama_new_context_with_model(model, ctx_params.pimpl) }
+        };
 
-        let model = LlamaModel { ctx, pimpl: model, loras: HashMap::new() };
-
-        Ok(model)
+        Ok(LlamaModel { ctx, pimpl: model, loras: HashMap::new() })
     }
 
     // Returns the description of the model type
@@ -790,6 +785,12 @@ impl LlamaContext {
         unsafe {
             llama_kv_cache_clear(self.pimpl)
         }
+    }
+}
+
+impl AsRef<LlamaContext> for LlamaContext {
+    fn as_ref(&self) -> &LlamaContext {
+        &self
     }
 }
 
