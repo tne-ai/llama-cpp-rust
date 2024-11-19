@@ -193,7 +193,7 @@ pub fn llama_set_log_level(log_level: LogLevel) {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct GenerationParams {
     /// The number of highest probability vocabulary tokens to keep for top-k filtering.
     pub top_k: Option<i32>,
@@ -576,11 +576,11 @@ impl LlamaModel {
     pub fn generate_stream<'a>(
         &'a self,
         messages: &'a [ChatMessage],
-        params: &'a GenerationParams,
+        params: GenerationParams,
     ) -> impl Stream<Item=Result<GenerateStreamItem>> + 'a {
         try_stream! {
             // Prepare the sampler from the given parameters.
-            let sampler = Sampler::new(self, params);
+            let sampler = Sampler::new(self, &params);
 
             // Tokenize the prompt.
             let tokenizer = LlamaTokenizer::new();

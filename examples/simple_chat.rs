@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
 
                 let mut output = String::new();
                 {
-                    let stream = model.generate_stream(&messages, &params);
+                    let stream = model.generate_stream(&messages, params);
                     pin_mut!(stream);
 
                     while let Some(ret) = stream.next().await {

@@ -9,7 +9,7 @@
 use async_stream::{stream as async_stream, try_stream};
 use axum::error_handling::HandleError;
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::routing::{get, post};
@@ -19,7 +19,6 @@ use clap::Parser;
 use futures_util::{pin_mut, Stream, StreamExt};
 use llama_cpp::{llama_set_log_level, ChatMessage, FinishReason, GenerateStreamItem, GenerationParams, LlamaContext, LlamaContextParams, LlamaHandle, LlamaModel, LlamaTokenizer, LogLevel};
 use miette::{IntoDiagnostic, Result};
-use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -119,7 +118,7 @@ async fn generate(
 
     if request.stream.unwrap_or(false) {
         let streamer = Box::pin(async_stream! {
-            let stream = state.model.generate_stream(&messages, &gen_params);
+            let stream = state.model.generate_stream(&messages, gen_params);
             pin_mut!(stream);
 
             while let Some(Ok(chunk)) = stream.next().await {
