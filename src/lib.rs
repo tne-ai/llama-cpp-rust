@@ -156,7 +156,7 @@ impl Into<ggml_log_level> for LogLevel {
 }
 
 
-pub fn llama_set_log_level(log_level: LogLevel) {
+fn llama_set_log_level(log_level: LogLevel) {
     unsafe extern "C" fn print_error(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
         if level >= ggml_log_level_GGML_LOG_LEVEL_ERROR {
             let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
@@ -170,13 +170,13 @@ pub fn llama_set_log_level(log_level: LogLevel) {
         }
     }
     unsafe extern "C" fn print_info(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
-        if level >= ggml_log_level_GGML_LOG_LEVEL_WARN {
+        if level >= ggml_log_level_GGML_LOG_LEVEL_INFO {
             let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
             info!("{}", log);
         }
     }
     unsafe extern "C" fn print_debug(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
-        if level >= ggml_log_level_GGML_LOG_LEVEL_WARN {
+        if level >= ggml_log_level_GGML_LOG_LEVEL_DEBUG {
             let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
             debug!("{}", log);
         }

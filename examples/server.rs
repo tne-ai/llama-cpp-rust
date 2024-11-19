@@ -15,9 +15,20 @@ use axum::response::{IntoResponse, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::builder::Str;
-use clap::Parser;
+use clap::{arg, Parser};
 use futures_util::{pin_mut, Stream, StreamExt};
-use llama_cpp::{llama_set_log_level, ChatMessage, FinishReason, GenerateStreamItem, GenerationParams, LlamaContext, LlamaContextParams, LlamaHandle, LlamaModel, LlamaTokenizer, LogLevel};
+use llama_cpp::{
+    ChatMessage,
+    FinishReason,
+    GenerateStreamItem,
+    GenerationParams,
+    LlamaContext,
+    LlamaContextParams,
+    LlamaHandle,
+    LlamaModel,
+    LlamaTokenizer,
+    LogLevel,
+};
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,6 +58,10 @@ struct Args {
     /// A path to GGUF model file.
     #[arg(long)]
     model_path: String,
+
+    /// Enable verbose output to provide detailed logging and additional information during execution
+    #[arg(short, default_value_t = false)]
+    verbose: bool,
 }
 
 // -------------------------------------------------------------------
@@ -168,12 +183,15 @@ async fn list_lora_adapters(
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    llama_set_log_level(LogLevel::Error);
 
     let handle = LlamaHandle::default();
-    handle.set_log_level(LogLevel::Warn);
 
     let args = Args::parse();
+    if args.verbose {
+        handle.set_log_level(LogLevel::Debug)
+    } else {
+        handle.set_log_level(LogLevel::Error)
+    }
 
     let mut ctx_params = LlamaContextParams::default();
     ctx_params.set_n_ctx(4096);
