@@ -114,8 +114,6 @@ async fn generate(
     State(state): State<AppState>,
     Json(request): Json<GenerateRequest>,
 ) -> impl IntoResponse {
-    // TODO:
-
     let tokenizer = LlamaTokenizer::new();
     let messages = [
         ChatMessage::new("user", request.inputs.as_str()),
@@ -129,11 +127,14 @@ async fn generate(
         gen_params.seed = params.seed;
         gen_params.typical_p = params.typical_p;
         gen_params.max_new_tokens = params.max_new_tokens;
+        gen_params.frequency_penalty = params.frequency_penalty;
+        gen_params.repetition_penalty = params.repetition_penalty;
+        gen_params.temperature = params.temperature;
     }
 
     if request.stream.unwrap_or(false) {
         let streamer = Box::pin(async_stream! {
-            let stream = state.model.generate_stream(&messages, gen_params);
+            let stream = state.model.generate_stream(&messages, &gen_params);
             pin_mut!(stream);
 
             while let Some(Ok(chunk)) = stream.next().await {
@@ -188,7 +189,7 @@ async fn main() {
 
     let args = Args::parse();
     if args.verbose {
-        handle.set_log_level(LogLevel::Debug)
+        handle.set_log_level(LogLevel::Info)
     } else {
         handle.set_log_level(LogLevel::Error)
     }

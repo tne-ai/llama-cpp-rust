@@ -12,6 +12,7 @@ use futures_util::stream::Stream;
 use hf_hub::{Repo, RepoType};
 use log::{debug, error, info, warn};
 use miette::{bail, miette, Diagnostic, IntoDiagnostic, Severity};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::{Debug, Formatter};
@@ -41,22 +42,44 @@ pub enum Error {
 /// The type of token id.
 pub type Token = llama_token;
 
+thread_local!(static G_LOG_LEVEL: RefCell<ggml_log_level> = RefCell::new(ggml_log_level_GGML_LOG_LEVEL_ERROR));
+unsafe extern "C" fn printer(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
+    G_LOG_LEVEL.with_borrow(|lv| {
+        if level >= *lv {
+            let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
+            match level {
+                ggml_log_level_GGML_LOG_LEVEL_ERROR => error!("{}", log),
+                ggml_log_level_GGML_LOG_LEVEL_WARN => warn!("{}", log),
+                ggml_log_level_GGML_LOG_LEVEL_INFO => info!("{}", log),
+                ggml_log_level_GGML_LOG_LEVEL_DEBUG => debug!("{}", log),
+                _ => (),
+            }
+        }
+    })
+}
+
 /// The RAII type that initialize and deinitialize resources for Llama.cpp.
 pub struct LlamaHandle {}
 
 impl LlamaHandle {
     /// Returns the default handle.
     pub fn default() -> Self {
-        llama_set_log_level(LogLevel::Error);
         unsafe {
             llama_backend_init();
         }
-        LlamaHandle {}
+        let handle = LlamaHandle {};
+        handle.set_log_level(LogLevel::Error);
+        handle
     }
 
     /// Set the log level for Llama.cpp.
     pub fn set_log_level(&self, level: LogLevel) {
-        llama_set_log_level(level.into())
+        G_LOG_LEVEL.with_borrow_mut(|lv| {
+            *lv = level.into();
+        });
+        unsafe {
+            llama_log_set(Some(printer), null_mut());
+        }
     }
 }
 
@@ -155,43 +178,6 @@ impl Into<ggml_log_level> for LogLevel {
     }
 }
 
-
-fn llama_set_log_level(log_level: LogLevel) {
-    unsafe extern "C" fn print_error(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
-        if level >= ggml_log_level_GGML_LOG_LEVEL_ERROR {
-            let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
-            error!("{}", log);
-        }
-    }
-    unsafe extern "C" fn print_warn(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
-        if level >= ggml_log_level_GGML_LOG_LEVEL_WARN {
-            let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
-            warn!("{}", log);
-        }
-    }
-    unsafe extern "C" fn print_info(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
-        if level >= ggml_log_level_GGML_LOG_LEVEL_INFO {
-            let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
-            info!("{}", log);
-        }
-    }
-    unsafe extern "C" fn print_debug(level: ggml_log_level, text: *const c_char, _: *mut c_void) {
-        if level >= ggml_log_level_GGML_LOG_LEVEL_DEBUG {
-            let log = unsafe { CStr::from_ptr(text).to_str().unwrap() };
-            debug!("{}", log);
-        }
-    }
-
-    unsafe {
-        match log_level {
-            LogLevel::Error => llama_log_set(Some(print_error), null_mut()),
-            LogLevel::Warn => llama_log_set(Some(print_warn), null_mut()),
-            LogLevel::Info => llama_log_set(Some(print_info), null_mut()),
-            LogLevel::Debug => llama_log_set(Some(print_debug), null_mut()),
-            _ => (),
-        }
-    }
-}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GenerationParams {
@@ -576,7 +562,7 @@ impl LlamaModel {
     pub fn generate_stream<'a>(
         &'a self,
         messages: &'a [ChatMessage],
-        params: GenerationParams,
+        params: &'a GenerationParams,
     ) -> impl Stream<Item=Result<GenerateStreamItem>> + 'a {
         try_stream! {
             // Prepare the sampler from the given parameters.
@@ -987,7 +973,12 @@ impl LlamaTokenizer {
     ///
     /// # Example
     ///
-    pub fn apply_chat_template(&self, model: &LlamaModel, messages: &[ChatMessage], add_generation_prompt: bool) -> Result<String> {
+    pub fn apply_chat_template(
+        &self,
+        model: &LlamaModel,
+        messages: &[ChatMessage],
+        add_generation_prompt: bool,
+    ) -> Result<String> {
         let mut alloc_size = 0usize;
         let mut roles = Vec::with_capacity(messages.len());
         let mut contents = Vec::with_capacity(messages.len());
@@ -1399,10 +1390,6 @@ mod tests {
 
     const TEST_MODEL_PATH: &'static str = "./models/Phi-3.5-mini-instruct-Q4_K_M.gguf";
     const TEST_LORA_PATH: &'static str = "./models/Phi3.5-mini-F16-LoRA.gguf";
-    #[test]
-    fn test_set_log_level() {
-        llama_set_log_level(LogLevel::Error);
-    }
 
     #[cfg(feature = "huggingface")]
     #[tokio::test]

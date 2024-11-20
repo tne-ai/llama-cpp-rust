@@ -84,11 +84,12 @@ struct Args {
 // https://github.com/ggerganov/llama.cpp/blob/master/examples/simple-chat/simple-chat.cpp
 #[tokio::main]
 async fn main() -> Result<()> {
+    let handle = LlamaHandle::default();
     let args = Args::parse();
     if args.verbose {
-        llama_set_log_level(LogLevel::Debug);
+        handle.set_log_level(LogLevel::Debug);
     } else {
-        llama_set_log_level(LogLevel::Error);
+        handle.set_log_level(LogLevel::Error);
     }
 
     let _handle = LlamaHandle::default();
@@ -140,7 +141,7 @@ async fn main() -> Result<()> {
 
                 let mut output = String::new();
                 {
-                    let stream = model.generate_stream(&messages, params);
+                    let stream = model.generate_stream(&messages, &params);
                     pin_mut!(stream);
 
                     while let Some(ret) = stream.next().await {
