@@ -719,7 +719,7 @@ impl LlamaModel {
 }
 
 impl fmt::Display for LlamaModel {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.write_str(&self.description())
     }
 }
@@ -996,14 +996,14 @@ impl LlamaTokenizer {
             chat.push(chat_msg);
 
             // Recommended to alloc size is 2 * (total number of characters)
-            alloc_size += ((m.role.len() + m.content.len()) * 2) as usize;
+            alloc_size += (m.role.len() + m.content.len()) * 2;
         }
 
         let mut c_formatted: Vec<c_char> = vec![0; alloc_size];
         let n_chars = unsafe {
             llama_chat_apply_template(
                 model.pimpl,
-                std::ptr::null(),
+                null(),
                 chat.as_mut_ptr(),
                 chat.len(),
                 add_generation_prompt,
@@ -1032,7 +1032,7 @@ impl LlamaTokenizer {
         }
 
         let c_formatted = unsafe { CStr::from_ptr(c_formatted.as_ptr()) };
-        Ok(c_formatted.to_str().unwrap().to_string())
+        Ok(c_formatted.to_str().expect("not an utf8 string").to_string())
     }
 
     /// Toeknizes a text into a vector of tokens.
