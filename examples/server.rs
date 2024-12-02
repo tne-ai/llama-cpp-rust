@@ -18,7 +18,7 @@ use clap::builder::Str;
 use clap::{arg, Parser};
 use futures_util::{pin_mut, Stream, StreamExt};
 use llama_cpp::{
-    ChatMessage,
+    ChatMessage as LlamaChatMessage,
     FinishReason,
     GenerateStreamItem,
     GenerationParams,
@@ -34,8 +34,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
+use uuid::uuid;
 
 type ModelRegistry<Model> = HashMap<String, Arc<Model>>;
 
@@ -60,13 +62,9 @@ struct Args {
     model_path: String,
 
     /// Enable verbose output to provide detailed logging and additional information during execution
-    #[arg(short, default_value_t = false)]
+    #[arg(long, default_value_t = false)]
     verbose: bool,
 }
-
-// -------------------------------------------------------------------
-// Types definition
-// -------------------------------------------------------------------
 
 #[derive(Deserialize, Debug)]
 struct GenerateParameters {
@@ -103,10 +101,70 @@ struct GenerateResponse {
     generated_text: String,
 }
 
-async fn list_models(
-    State(state): State<AppState>,
-) {
-    //
+#[derive(Deserialize, Debug)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    stream: Option<bool>,
+    max_tokens: Option<usize>,
+    tok_k: Option<i32>,
+    top_p: Option<f32>,
+    temperature: Option<f32>,
+    seed: Option<u64>,
+    frequency_penalty: Option<f32>,
+}
+
+#[derive(Serialize, Debug)]
+struct ChatCompletion {
+    id: String,
+    choices: Vec<Choice>,
+    created: u64,
+    model: String,
+    system_finterprint: Option<String>,
+    usage: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct ChatCompletionMessage {
+    content: Option<String>,
+    role: Option<String>,
+}
+
+
+#[derive(Serialize, Debug)]
+struct Choice {
+    finish_reason: Option<String>,
+    index: u64,
+    message: ChatCompletionMessage,
+}
+
+#[derive(Serialize, Debug)]
+struct ChatCompletionChunk {
+    id: String,
+    choices: Vec<ChoiceChunk>,
+    created: u64,
+    model: String,
+    system_finterprint: Option<String>,
+    usage: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct ChoiceChunk {
+    delta: ChoiceDelta,
+    finish_reason: Option<String>,
+    index: u64,
+}
+
+#[derive(Serialize, Debug)]
+struct ChoiceDelta {
+    content: Option<String>,
+    role: Option<String>,
 }
 
 
@@ -116,7 +174,7 @@ async fn generate(
 ) -> impl IntoResponse {
     let tokenizer = LlamaTokenizer::new();
     let messages = [
-        ChatMessage::new("user", request.inputs.as_str()),
+        LlamaChatMessage::new("user", request.inputs.as_str()),
     ];
     let prompt = tokenizer.apply_chat_template(state.model.as_ref(), &messages, true).expect("failed to apply chat template");
     let mut gen_params = GenerationParams::default();
@@ -165,20 +223,99 @@ async fn generate(
     }
 }
 
-async fn generate_stream(
-    State(state): State<AppState>,
-) {
-    //
-}
-
 async fn chat_completion(
     State(state): State<AppState>,
-) {}
+    Json(payload): Json<ChatCompletionRequest>,
+) -> impl IntoResponse {
+    let mut messages = Vec::<LlamaChatMessage>::with_capacity(payload.messages.len());
+    for m in &payload.messages {
+        messages.push(LlamaChatMessage::new(m.role.as_str(), m.content.as_str()));
+    }
 
-async fn list_lora_adapters(
-    State(state): State<AppState>,
-) {
-    //
+    let tokenizer = LlamaTokenizer::new();
+    let prompt = tokenizer.apply_chat_template(state.model.as_ref(), &messages, true).expect("failed to apply chat template");
+
+    let mut params = GenerationParams::default();
+    params.top_k = payload.tok_k;
+    params.top_p = payload.top_p;
+    params.temperature = payload.temperature;
+    params.seed = payload.seed;
+    params.max_new_tokens = payload.max_tokens;
+    params.frequency_penalty = payload.frequency_penalty;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let created = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    let mut index = 0;
+
+    if payload.stream.unwrap_or(false) {
+        let streamer = Box::pin(async_stream! {
+            let stream = state.model.generate_stream(&messages, &params);
+            pin_mut!(stream);
+
+            while let Some(Ok(chunk)) = stream.next().await {
+                let data = ChatCompletionChunk {
+                    id: id.to_owned(),
+                    created: created.as_secs(),
+                    model: payload.model.to_owned(),
+                    choices: vec![
+                        ChoiceChunk{
+                            delta: ChoiceDelta{
+                                content: Some(chunk.generated_text),
+                                role: Some("assistant".to_owned()),
+                            },
+                            finish_reason: chunk.details.finish_reason.map(|reason| {
+                                let finish_reason = match reason {
+                                    FinishReason::Stop => "stop",
+                                    FinishReason::MaxTokens => "length",
+                                    _ => "",
+                                };
+                                finish_reason.to_owned()
+                            }),
+                            index,
+                        }
+                    ],
+                    system_finterprint: None,
+                    usage: None,
+                };
+
+                let event: Result<Event, fmt::Error> = Ok(Event::default().json_data(data).unwrap());
+                yield event;
+
+                index += 1;
+            }
+        });
+
+        Sse::new(streamer)
+            .keep_alive(KeepAlive::default())
+            .into_response()
+    } else {
+        let output = state.model.generate(&messages, params).expect("failed to generate");
+        let response = ChatCompletion {
+            id,
+            created: created.as_secs(),
+            model: payload.model.to_owned(),
+            choices: vec![
+                Choice {
+                    message: ChatCompletionMessage {
+                        role: Some("assistant".to_owned()),
+                        content: Some(output.generated_text),
+                    },
+                    finish_reason: output.details.finish_reason.map_or(None, |reason| {
+                        match reason {
+                            FinishReason::MaxTokens => Some("length".to_owned()),
+                            FinishReason::Stop => Some("stop".to_owned()),
+                            _ => None,
+                        }
+                    }),
+                    index: 0,
+                },
+            ],
+            system_finterprint: None,
+            usage: None,
+        };
+
+        Json(response).into_response()
+    }
 }
 
 #[tokio::main]
@@ -206,10 +343,8 @@ async fn main() {
     };
 
     let router = Router::new()
-        // .route("/models", get(list_models))
         .route("/generate", post(generate))
-        // .route("/v1/chat/completions", post(chat_completion))
-        // .route("/lora/adapters", get(list_lora_adapters))
+        .route("/v1/chat/completions", post(chat_completion))
         .with_state(state)
         .layer(
             CorsLayer::new()

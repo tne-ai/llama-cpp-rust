@@ -940,6 +940,7 @@ impl Into<llama_context_params> for LlamaContextParams {
     }
 }
 
+
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
